@@ -1,0 +1,28 @@
+Reward function:
+small reward for moving the box
+reward based on the improvement of the contact graspnet evaluation
+large negative reward for making the object fall out of the box
+actionspace:
+null action
+x points which represent action primitives
+
+
+on reset:
+box location and orientation is randomized against the back wall
+run contact graspnet forwardpass on image to estimate the "graspability" of the object
+
+select actions:
+Q-NET input: segmented pointcloud where each point has a list of which planes on the cube it corresponds to
+question: does the order of the planes matter? should the first plane always be the one facin the camera (etc)
+output: a confidence level which represents the chance of a successful action primitive increase graspability at that state
+
+carry out action:
+carry out action primtive (form tbd)
+
+
+graspability check:
+find the face facing the camera
+check:
+    how far the two horizontal edges are apart (less than gripper width)
+    check the distance from the horizontal edges to the wall (maximize)
+    minimize angle between the face normal and the camera normal

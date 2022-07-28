@@ -1,0 +1,16 @@
+Importing module 'gym_37' (/home/aurmr/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_37.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/aurmr/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.8.1
+Device count 1
+/home/aurmr/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/aurmr/.cache/torch_extensions as PyTorch extensions root...
+Emitting ninja build file /home/aurmr/.cache/torch_extensions/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+Loading extension module gymtorch...

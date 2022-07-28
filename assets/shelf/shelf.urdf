@@ -9,105 +9,105 @@
 <!-- =================================================================================== -->
 <robot name="shelf">
   <link name="center"/>
-  <link name="shelf_base">
+  <link name="back">
     <visual>
       <geometry>
         <box size="1.25 1.25 0.025"/>
       </geometry>
-      <material name="top"/>
+      <material name="back"/>
     </visual>
     <collision>
       <geometry>
         <box size="1.25 1.25 0.025"/>
       </geometry>
-      <material name="top"/>
+      <material name="back"/>
     </collision>
   </link>
-  <link name="shelf_side1">
+  <link name="right">
     <visual>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </visual>
     <collision>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </collision>
   </link>
-  <link name="shelf_side2">
+  <link name="left">
     <visual>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </visual>
     <collision>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </collision>
   </link>
-  <link name="shelf_side3">
+  <link name="bottom">
     <visual>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </visual>
     <collision>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </collision>
   </link>
-  <link name="shelf_side4">
+  <link name="top">
     <visual>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </visual>
     <collision>
       <geometry>
-        <box size="0.5 1.25 0.025"/>
+        <box size="0.3 1.25 0.025"/>
       </geometry>
-      <material name="bottom"/>
+      <material name="side"/>
     </collision>
   </link>
   <joint name="center_base_joint" type="fixed">
     <parent link="center"/>
-    <child link="shelf_base"/>
-    <origin rpy="0 0 0 " xyz="0 0 -0.25"/>
+    <child link="back"/>
+    <origin rpy="0 1.5708 0" xyz="0 0 -0.15"/>
   </joint>
-  <joint name="shelf_joint1" type="fixed">
-    <parent link="shelf_base"/>
-    <child link="shelf_side1"/>
-    <origin rpy="1.5708 1.5708 0 " xyz="0 0.6125 0.25"/>
+  <joint name="right_joint" type="fixed">
+    <parent link="back"/>
+    <child link="right"/>
+    <origin rpy="1.5708 1.5708 0 " xyz="0 0.6125 0.15"/>
   </joint>
-  <joint name="shelf_joint2" type="fixed">
-    <parent link="shelf_base"/>
-    <child link="shelf_side2"/>
-    <origin rpy="1.5708 1.5708 0 " xyz="0 -0.6125 0.25"/>
+  <joint name="left_joint" type="fixed">
+    <parent link="back"/>
+    <child link="left"/>
+    <origin rpy="1.5708 1.5708 0 " xyz="0 -0.6125 0.15"/>
   </joint>
-  <joint name="shelf_joint3" type="fixed">
-    <parent link="shelf_base"/>
-    <child link="shelf_side3"/>
-    <origin rpy="0 1.5708 0 " xyz="0.6125  0 0.25"/>
+  <joint name="bottom_joint" type="fixed">
+    <parent link="back"/>
+    <child link="bottom"/>
+    <origin rpy="0 1.5708 0 " xyz="0.6125  0 0.15"/>
   </joint>
-  <joint name="shelf_joint4" type="fixed">
-    <parent link="shelf_base"/>
-    <child link="shelf_side4"/>
-    <origin rpy="0 1.5708 0 " xyz="-0.6125 0 0.25"/>
+  <joint name="top_joint" type="fixed">
+    <parent link="back"/>
+    <child link="top"/>
+    <origin rpy="0 1.5708 0 " xyz="-0.6125 0 0.15"/>
   </joint>
-  <material name="top">
+  <material name="back">
     <color rgba="1. 1. 1. 1."/>
   </material>
-  <material name="bottom">
+  <material name="side">
     <color rgba=".4 .4 .4 1."/>
   </material>
 </robot>
