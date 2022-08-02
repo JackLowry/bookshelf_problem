@@ -73,12 +73,12 @@ class Bookshelf():
     def init_gym(self):
         # acquire gym interface
         self.gym = gymapi.acquire_gym()
-
+        self.dt = 1.0/60.0
         # configure sim
         sim_params = gymapi.SimParams()
         sim_params.up_axis = gymapi.UP_AXIS_Z
         sim_params.gravity = gymapi.Vec3(0.0, 0.0, -9.8)
-        sim_params.dt = 1.0 / 60.0
+        sim_params.dt = self.dt
         sim_params.substeps = 2
         sim_params.use_gpu_pipeline = self.USE_GPU_PIPELINE
         if self.PHYSICS_ENGINE == gymapi.SIM_PHYSX:
@@ -598,26 +598,24 @@ class Bookshelf():
         curr_depth_tensors = torch.cat(self.depth_tensors, 0)
         curr_seg_tensors = torch.cat(self.seg_tensors, 0)
 
-        seg_depth_tensors = torch.where(curr_seg_tensors==self.BOX_SEG_ID, curr_depth_tensors.to(torch.double), float('nan')).to(torch.float)
+        # seg_depth_tensors = torch.where(curr_seg_tensors==self.BOX_SEG_ID, curr_depth_tensors.to(torch.double), float('nan')).to(torch.float)
 
-        pointcloud = backproject_tensor(self.proj_matrixes, self.inv_view_matrixes, seg_depth_tensors, curr_seg_tensors).clone()
+        pointcloud = backproject_tensor(self.proj_matrixes, self.inv_view_matrixes, curr_depth_tensors, curr_seg_tensors).clone()
         # the view matrix transforms to the global frame rather than the environment frame, so we have to subtract the environment origins to 
         # turn them into the environment frame
-
         pointcloud = pointcloud - self.env_origins.unsqueeze(1)
 
+        segmentation_map = curr_seg_tensors.flatten(1, 2).unsqueeze(-1)
+        state = torch.cat((pointcloud, segmentation_map), 2)
 
-        self.box_pos = self.rb_states[self.box_idxs, :3]
-        self.box_rot = self.rb_states[self.box_idxs, 3:7]
-
-        
-        box_face_normals, box_face_points = self.get_rect_planes(self.box_pos, self.box_rot, self.box_size_tensor)
-        self.calculate_graspability(box_face_normals,box_face_points,self.box_size_tensor)
-        axes_box_face_points = box_face_points
-        self.gym.end_access_image_tensors(self.sim)
-        #ALL CAMERA ACCESS CODE GOES IN HERE 
-        
         if self.DEBUG_VIZ:
+            self.box_pos = self.rb_states[self.box_idxs, :3]
+            self.box_rot = self.rb_states[self.box_idxs, 3:7]
+            box_face_normals, box_face_points = self.get_rect_planes(self.box_pos, self.box_rot, self.box_size_tensor)
+            self.calculate_graspability(box_face_normals,box_face_points,self.box_size_tensor)
+            axes_box_face_points = box_face_points
+            self.gym.end_access_image_tensors(self.sim)
+            #ALL CAMERA ACCESS CODE GOES IN HERE 
             for i in range(len(self.envs)):
                 plane_origin = axes_box_face_points[i]
                 plane_end = (axes_box_face_points[i] + box_face_normals[i])
@@ -656,8 +654,33 @@ class Bookshelf():
                 lines = torch.cat((line_start, line_end), dim=1).clone()
                 self.gym.add_lines(self.viewer, self.envs[i], final_p_e.shape[0], lines.cpu().numpy(), colors)
 
+        return state
 
     def step(self, action):
+            # update viewer
+            self.gym.draw_viewer(self.viewer, self.sim, False)
+            self.gym.sync_frame_time(self.sim)
+            self.gym.refresh_force_sensor_tensor(self.sim)
+            # step the physics
+            self.gym.simulate(self.sim)
+            self.gym.fetch_results(self.sim, True)
+            self.gym.step_graphics(self.sim)
+
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            self.gym.refresh_dof_state_tensor(self.sim)
+            self.gym.refresh_jacobian_tensors(self.sim)
+            self.gym.refresh_mass_matrix_tensors(self.sim)
+            
+            # self.gym.clear_lines(self.viewer)
+            # # refresh camera images
+            # self.gym.render_all_camera_sensors(self.sim)
+
+    def do_actions(self, actions):
+        #FIGURE OUT ACTION:
+        time_max = int(3.0 / self.dt)
+        steps = 0
+        z_depth = .05
+        while(steps < time_max):
             self.box_pos = self.rb_states[self.box_idxs, :3]
             self.box_rot = self.rb_states[self.box_idxs, 3:7]
             eef_pos = self.rb_states[self.eef_idxs, :3]
@@ -703,25 +726,8 @@ class Bookshelf():
             
             _fsdata = self.gym.acquire_force_sensor_tensor(self.sim)
             fsdata = gymtorch.wrap_tensor(_fsdata)
-            # print(fsdata)   # force as Vec3
-            # update viewer
-            self.gym.draw_viewer(self.viewer, self.sim, False)
-            self.gym.sync_frame_time(self.sim)
-            self.gym.refresh_force_sensor_tensor(self.sim)
-            # step the physics
-            self.gym.simulate(self.sim)
-            self.gym.fetch_results(self.sim, True)
-            self.gym.step_graphics(self.sim)
-
-            self.gym.refresh_rigid_body_state_tensor(self.sim)
-            self.gym.refresh_dof_state_tensor(self.sim)
-            self.gym.refresh_jacobian_tensors(self.sim)
-            self.gym.refresh_mass_matrix_tensors(self.sim)
-            
-            # self.gym.clear_lines(self.viewer)
-            # # refresh camera images
-            # self.gym.render_all_camera_sensors(self.sim)
-
+            self.step()
+            steps = steps+1
     def cleanup(self):
         self.gym.destroy_viewer(self.viewer)
         self.gym.destroy_sim(self.sim)
@@ -733,7 +739,8 @@ if __name__ == "__main__":
     while not bookshelf.gym.query_viewer_has_closed(bookshelf.viewer):
         if frames % 200 == 0:
             bookshelf.reset()
-            # bookshelf.observe()
+            state = bookshelf.observe()
+            print(state)
         bookshelf.step(None)
         frames = frames + 1
     bookshelf.cleanup()
