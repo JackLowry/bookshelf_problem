@@ -1,0 +1,160 @@
+<?xml version="1.0" ?>
+<robot name="eef" xmlns:xacro="http://www.ros.org/wiki/xacro">
+ <!-- Ball EEF -->
+    <link name="X">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+    
+    <link name="Y">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+    
+    <link name="Z">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+
+    <link name="X_rot">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+
+    <link name="Y_rot">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+
+    <link name="Z_rot">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+
+    <link name="sphere_center">
+    <visual>
+        <geometry>
+        <sphere radius=".01"/>
+        </geometry>
+    </visual>
+    </link>
+
+    <link name="ball_EEF_rod">
+    <visual>
+    <geometry>
+        <box size=".001 .001 .1"/>
+    </geometry>
+    <material name="rod"/>
+    </visual>
+    <collision>
+    <geometry>
+        <box size=".001 .001 .1"/>
+    </geometry>
+    <material name="rod"/>
+    </collision>
+    </link>
+
+    <link name="ball_EEF">
+    <visual>
+    <geometry>
+        <sphere radius=".01"/>
+    </geometry>
+    <material name="ball"/>
+    </visual>
+    <collision>
+    <geometry>
+        <sphere radius=".01"/>
+    </geometry>
+    <material name="ball"/>
+    </collision>
+    </link>
+
+
+    <joint name="ball_EEF_joint" type="fixed">
+    <parent link="ball_EEF_rod"/>
+    <child link="ball_EEF"/>
+    <origin xyz="0 0 .05"/>
+    </joint>
+
+    <joint name="sphere_center_joint" type="fixed">
+    <parent link="sphere_center"/>
+    <child link="ball_EEF_rod"/>
+    <origin xyz="0 0 .05"/>
+    </joint>
+
+
+    <joint name="x_joint" type="prismatic">
+    <parent link="X"/>
+    <child link="Y"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <dynamics damping="10.0"/>
+    <limit effort="12" lower="-100" upper="100" velocity="100"/>
+    </joint>
+    <joint name="y_joint" type="prismatic">
+    <parent link="Y"/>
+    <child link="Z"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <dynamics damping="10.0"/>
+    <limit effort="12" lower="-100" upper="100" velocity="100"/>
+    </joint>
+    <joint name="z_joint" type="prismatic">
+    <parent link="Z"/>
+    <child link="X_rot"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="10.0"/>
+    <limit effort="12" lower="-100" upper="100" velocity="100"/>
+    </joint>
+
+    <joint name="x_rot_joint" type="revolute">
+    <parent link="X_rot"/>
+    <child link="Y_rot"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <dynamics damping="10.0"/>
+    <limit effort="12" lower="-100" upper="100" velocity="100"/>
+    </joint>
+    <joint name="y_rot_joint" type="revolute">
+    <parent link="Y_rot"/>
+    <child link="Z_rot"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <dynamics damping="10.0"/>
+    <limit effort="12" lower="-100" upper="100" velocity="100"/>
+    </joint>
+    <joint name="z_rot_joint" type="revolute">
+    <parent link="Z_rot"/>
+    <child link="sphere_center"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="10.0"/>
+    <limit effort="12" lower="-100" upper="100" velocity="100"/>
+    </joint>
+
+    <material name="ball">
+    <color rgba="0. 1. 0. 1."/>
+    </material>
+    <material name="rod">
+    <color rgba="0. 0. 0. 1."/>
+    </material>
+</robot>

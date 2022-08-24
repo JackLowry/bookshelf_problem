@@ -1,6 +1,3 @@
-
-
-
 #!/home/aurmr/anaconda3/envs/rlgpu3/bin/python
 
 """
@@ -18,7 +15,8 @@ Use Jacobian matrix and inverse kinematics control of Franka robot to pick up a 
 Damped Least Squares method from: https://www.math.ucsd.edu/~sbuss/ResearchWeb/ikmethods/iksurvey.pdf
 """
 
-from turtle import end_poly, left, right
+from cmath import cos, pi
+from turtle import end_poly, left, right, update
 from isaacgym import gymapi
 from isaacgym import gymutil
 from isaacgym import gymtorch
@@ -27,15 +25,16 @@ from isaacgym.torch_utils import *
 import math
 
 from pyparsing import line
+from Pointnet_Pointnet2_pytorch.visualizer.eulerangles import euler2quat
 import numpy as np
 import torch
 import random
 import time
-from pytorch3d.transforms import euler_angles_to_matrix, matrix_to_quaternion
+from pytorch3d.transforms import euler_angles_to_matrix, matrix_to_quaternion, matrix_to_euler_angles, axis_angle_to_matrix
+from pytorch3d.ops import estimate_pointcloud_normals
+from util import backproject_tensor, match_planes, batch_tensor_linspace, orientation_error, quaternion_rotation_matrix, estimate_pc_normals
 
-from util import backproject_tensor, match_planes, batch_tensor_linspace, orientation_error, quaternion_rotation_matrix
-
-
+import matplotlib.pyplot as plt
 class Bookshelf():
     
     BOX_SEG_ID = 1
@@ -48,15 +47,17 @@ class Bookshelf():
     USE_GPU = True
     PHYSICS_ENGINE = gymapi.SIM_PHYSX
     NUM_THREADS = 0
-
+    USE_VIEWER = True
     ASSET_ROOT = "/home/aurmr/research/isaac_manip/assets"
     SHELF_LENGTH = 1.25
     SHELF_WALL_WIDTH = .025
     SHELF_DEPTH = 0.3
 
+    EEF_ROD_LEN = .1
+
     DEBUG_VIZ = False
 
-    
+
     def __init__(self):
         # set random seed
         np.random.seed(42)
@@ -89,6 +90,7 @@ class Bookshelf():
             sim_params.physx.contact_offset = 0.001
             sim_params.physx.friction_offset_threshold = 0.001
             sim_params.physx.friction_correlation_distance = 0.0005
+            sim_params.physx.max_depenetration_velocity = 1
             sim_params.physx.num_threads = self.NUM_THREADS
             sim_params.physx.use_gpu = self.USE_GPU
         else:
@@ -100,11 +102,12 @@ class Bookshelf():
             raise Exception("Failed to create sim")
 
         # create viewer
-        viewer_prop = gymapi.CameraProperties()
-        viewer_prop.use_collision_geometry = True
-        self.viewer = self.gym.create_viewer(self.sim, viewer_prop)
-        if self.viewer is None:
-            raise Exception("Failed to create viewer")
+        if self.USE_VIEWER:
+            viewer_prop = gymapi.CameraProperties()
+            viewer_prop.use_collision_geometry = True
+            self.viewer = self.gym.create_viewer(self.sim, viewer_prop)
+            if self.viewer is None:
+                raise Exception("Failed to create viewer")
 
         self.gym.set_light_parameters(self.sim, 3, gymapi.Vec3(.3, .3, .3), gymapi.Vec3(.3, .3, .3), gymapi.Vec3(1, 0, 1))
 
@@ -136,44 +139,45 @@ class Bookshelf():
         shelf_sensor_pose = gymapi.Transform(gymapi.Vec3(0.2, 0.0, 0.0))
         shelf_sensor_idx = self.gym.create_asset_force_sensor(self.shelf_asset, shelf_bottom_idx, shelf_sensor_pose)
 
-        # load franka asset
-        franka_asset_file = "urdf/franka_description/robots/franka_panda_no_visual.urdf"
+        # load EEF asset
+        eef_asset_file = "shelf/eef_only.urdf"
         asset_options = gymapi.AssetOptions()
-        asset_options.armature = 0.01
-        asset_options.fix_base_link = True
         asset_options.disable_gravity = True
-        asset_options.flip_visual_attachments = True
-        self.franka_asset = self.gym.load_asset(self.sim, asset_root, franka_asset_file, asset_options)
-
+        asset_options.fix_base_link = True
+        asset_options.max_linear_velocity = .0005
+        asset_options.max_angular_velocity = .005
+        # asset_options.flip_visual_attachments = True
+        self.eef_asset = self.gym.load_asset(self.sim, asset_root, eef_asset_file, asset_options)
+        
         # configure franka dofs
-        self.franka_dof_props = self.gym.get_asset_dof_properties(self.franka_asset)
-        franka_lower_limits = self.franka_dof_props["lower"]
-        franka_upper_limits = self.franka_dof_props["upper"]
-        franka_ranges = franka_upper_limits - franka_lower_limits
-        franka_mids = 0.3 * (franka_upper_limits + franka_lower_limits)
+        self.eef_dof_props = self.gym.get_asset_dof_properties(self.eef_asset)
+        # franka_lower_limits = self.eef_dof_props["lower"]
+        # franka_upper_limits = self.eef_dof_props["upper"]
+        # franka_ranges = franka_upper_limits - franka_lower_limits
+        # franka_mids = 0.3 * (franka_upper_limits + franka_lower_limits)
 
-        self.franka_dof_props["driveMode"][:7].fill(gymapi.DOF_MODE_POS)
-        self.franka_dof_props["stiffness"][:7].fill(400.0)
-        self.franka_dof_props["damping"][:7].fill(40.0)
-        self.franka_dof_props["velocity"][:7].fill(0.05)
+        self.eef_dof_props["driveMode"][:].fill(gymapi.DOF_MODE_EFFORT)
+        self.eef_dof_props["stiffness"][:].fill(0)
+        self.eef_dof_props["damping"][:].fill(40.0)
+        self.eef_dof_props["velocity"][:].fill(0.00000005)
         # default 87 87 87 87 12 12 12
-        self.franka_dof_props["effort"][:7].fill(150)
+        self.eef_dof_props["effort"][:].fill(1000)
 
         # grippers
-        self.franka_dof_props["driveMode"][7:].fill(gymapi.DOF_MODE_POS)
-        self.franka_dof_props["stiffness"][7:].fill(800.0)
-        self.franka_dof_props["damping"][7:].fill(40.0)
+        # self.franka_dof_props["driveMode"][7:].fill(gymapi.DOF_MODE_POS)
+        # self.franka_dof_props["stiffness"][7:].fill(800.0)
+        # self.franka_dof_props["damping"][7:].fill(40.0)
 
         # default dof states and position targets
-        franka_num_dofs = self.gym.get_asset_dof_count(self.franka_asset)
-        self.default_dof_pos = np.zeros(franka_num_dofs, dtype=np.float32)
-        self.default_dof_pos[:7] = franka_mids[:7]
+        self.eef_num_dofs = self.gym.get_asset_dof_count(self.eef_asset)
+        self.default_dof_pos = np.zeros(self.eef_num_dofs, dtype=np.float32)
+        # self.default_dof_pos[:7] = franka_mids[:7]
 
-        self.default_franka_dof_state = np.zeros(franka_num_dofs, gymapi.DofState.dtype)
-        self.default_franka_dof_state["pos"] = self.default_dof_pos
+        self.default_eef_dof_state = np.zeros(self.eef_num_dofs, gymapi.DofState.dtype)
+        self.default_eef_dof_state["pos"] = self.default_dof_pos
 
         # send to torch
-        default_dof_pos_tensor = to_torch(self.default_dof_pos, device=self.device)
+        # default_dof_pos_tensor = to_torch(self.default_dof_pos, device=self.device)
 
     def get_rect_planes(self, box_trans, box_rot, box_sizes):
         self.box_orig_normals = torch.Tensor([[1, 0, 0], [-1, 0, 0],
@@ -262,8 +266,8 @@ class Bookshelf():
 
     def create_environments(self):
         # get link index of panda hand, which we will use as end effector
-        franka_link_dict = self.gym.get_asset_rigid_body_dict(self.franka_asset)
-        self.eef_index = franka_link_dict["ball_EEF"]
+        eef_link_dict = self.gym.get_asset_rigid_body_dict(self.eef_asset)
+        self.eef_index = eef_link_dict["ball_EEF"]
 
         # configure env grid
         num_envs = self.NUM_ENVS
@@ -273,9 +277,10 @@ class Bookshelf():
         env_upper = gymapi.Vec3(spacing, spacing, spacing)
         print("Creating %d environments" % num_envs)
 
-        franka_pose = gymapi.Transform()
-        franka_pose.p = gymapi.Vec3(0, 0, 0)
-        franka_pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), math.pi)
+        eef_pose = gymapi.Transform()
+        eef_pose.p = gymapi.Vec3(0, 0, 2)
+        eef_pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), math.pi)
+
 
 
         shelf_pose = gymapi.Transform() 
@@ -299,7 +304,7 @@ class Bookshelf():
         box_size_tensor = []
         self.box_sizes = []
         self.box_idxs = []
-        self.franka_idxs = []
+        self.eef_actor_idxs = []
         self.box_actor_idxs = []
         for i in range(num_envs):
             # create env
@@ -312,13 +317,17 @@ class Bookshelf():
             # for i in range(num_sensors):
             #     sensor = self.gymget_actor_force_sensor(env, shelf_handle, i)
             
+            shelf_rigid_shape_props = self.gym.get_actor_rigid_shape_properties(env, shelf_handle)
+            for b in shelf_rigid_shape_props:
+                b.friction = 0
+                b.rolling_friction = 0
+                b.torsion_friction = 0
+            self.gym.set_actor_rigid_shape_properties(env, shelf_handle, shelf_rigid_shape_props)
             # # create box asset
             BOX_SIZE_MINS = [.05, .05, .05]
-            BOX_SIZE_MAXS = [.3, .3, .2]
+            BOX_SIZE_MAXS = [.3, .15, .15]
             # BOX_SIZE_MINS = [.1, .3, .2]
             # BOX_SIZE_MAXS = [.1, .3, .2]
-
-
 
             box_x = random.random()*(BOX_SIZE_MAXS[0]-BOX_SIZE_MINS[0])+BOX_SIZE_MINS[0]
             box_y = random.random()*(BOX_SIZE_MAXS[1]-BOX_SIZE_MINS[1])+BOX_SIZE_MINS[1]
@@ -329,28 +338,38 @@ class Bookshelf():
             self.box_sizes.append(box_size)
             box_size_tensor.append(torch.Tensor([box_z, box_y, box_x]).to(self.device).unsqueeze(0))
             asset_options = gymapi.AssetOptions()
-            asset_options.density = 50#110
+            asset_options.density = .1#110
+            asset_options.max_linear_velocity = 1
+            asset_options.max_angular_velocity = 1
             box_asset = self.gym.create_box(self.sim, box_size.x, box_size.y, box_size.z, asset_options)
 
-
-            box_idx = self.gym.find_asset_rigid_body_index(box_asset, "box")
-            box_sensor_pose = gymapi.Transform(gymapi.Vec3(0.2, 0.0, 0.0))
-            box_sensor_idx = self.gym.create_asset_force_sensor(box_asset, box_idx, box_sensor_pose)
+            # box_idx = self.gym.find_asset_rigid_body_index(box_asset, "box")
+            # box_sensor_pose = gymapi.Transform(gymapi.Vec3(0.2, 0.0, 0.0))
+            # box_sensor_idx = self.gym.create_asset_force_sensor(box_asset, box_idx, box_sensor_pose)
 
             # BOX_OFFSET = 0.01
             bottom_handle = self.gym.find_actor_rigid_body_handle(env, shelf_handle, "bottom")
             self.shelf_bottom_pose = self.gym.get_rigid_transform(env, bottom_handle)
             box_pose = gymapi.Transform()
-            box_pose.p.x = 0#self.shelf_bottom_pose.p.x -self.SHELF_DEPTH/2+self.SHELF_WALL_WIDTH/2 + box_size.x/2 + BOX_OFFSET
-            box_pose.p.y = 0#self.shelf_bottom_pose.p.y -self.SHELF_LENGTH/2+self.SHELF_WALL_WIDTH/2 + box_size.y/2 + BOX_OFFSET
-            box_pose.p.z = 0#self.shelf_bottom_pose.p.z + self.SHELF_WALL_WIDTH/2 + box_size.z/2 + BOX_OFFSET
+            # box_pose.p.x = 0#self.shelf_bottom_pose.p.x -self.SHELF_DEPTH/2+self.SHELF_WALL_WIDTH/2 + box_size.x/2 + BOX_OFFSET
+            # box_pose.p.y = 0#self.shelf_bottom_pose.p.y -self.SHELF_LENGTH/2+self.SHELF_WALL_WIDTH/2 + box_size.y/2 + BOX_OFFSET
+            # box_pose.p.z = 0#self.shelf_bottom_pose.p.z + self.SHELF_WALL_WIDTH/2 + box_size.z/2 + BOX_OFFSET
             box_pose.r = gymapi.Quat(0, 0, 0, 1)
 
             
             box_handle = self.gym.create_actor(env, box_asset, box_pose, "box", i, 0, segmentationId=self.BOX_SEG_ID)
+
+            box_rigid_shape_props = self.gym.get_actor_rigid_shape_properties(env, box_handle)
+            for b in box_rigid_shape_props:
+                b.friction = 1
+                b.rolling_friction = 1
+                b.torsion_friction = 1
+            self.gym.set_actor_rigid_shape_properties(env, box_handle, box_rigid_shape_props)
+
             color = gymapi.Vec3(np.random.uniform(0, 1), np.random.uniform(0, 1), np.random.uniform(0, 1))
             self.gym.set_rigid_body_color(env, box_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color)
-            sensor = self.gym.get_actor_force_sensor(env, box_handle, 0)
+            # sensor = self.gym.get_actor_force_sensor(env, box_handle, 0)
+
 
 
             # get global index of box in rigid body state tensor
@@ -358,35 +377,43 @@ class Bookshelf():
             self.box_idxs.append(box_idx)
 
             # add franka
-            franka_handle = self.gym.create_actor(env, self.franka_asset, franka_pose, "franka", i, 2)
+            eef_handle = self.gym.create_actor(env, self.eef_asset, eef_pose, "EEF", i, 2)
+
+            eef_rigid_shape_props = self.gym.get_actor_rigid_shape_properties(env, eef_handle)
+            for b in eef_rigid_shape_props:
+                b.friction = 1
+                b.rolling_friction = 1
+                b.torsion_friction = 1
+            self.gym.set_actor_rigid_shape_properties(env, eef_handle, eef_rigid_shape_props)
 
             # set dof properties
-            self.gym.set_actor_dof_properties(env, franka_handle, self.franka_dof_props)
+            self.gym.set_actor_dof_properties(env, eef_handle, self.eef_dof_props)
 
             # set initial dof states
-            self.gym.set_actor_dof_states(env, franka_handle, self.default_franka_dof_state, gymapi.STATE_ALL)
+            self.gym.set_actor_dof_states(env, eef_handle, self.default_eef_dof_state, gymapi.STATE_ALL)
 
             # set initial position targets
-            self.gym.set_actor_dof_position_targets(env, franka_handle, self.default_dof_pos)
+            self.gym.set_actor_dof_position_targets(env, eef_handle, self.default_dof_pos)
 
             # get inital hand pose
-            hand_handle = self.gym.find_actor_rigid_body_handle(env, franka_handle, "ball_EEF")
+            hand_handle = self.gym.find_actor_rigid_body_handle(env, eef_handle, "ball_EEF")
             hand_pose = self.gym.get_rigid_transform(env, hand_handle)
             init_pos_list.append([hand_pose.p.x, hand_pose.p.y, hand_pose.p.z])
             init_rot_list.append([hand_pose.r.x, hand_pose.r.y, hand_pose.r.z, hand_pose.r.w])
 
             # get global index of hand in rigid body state tensor
-            eef_idx = self.gym.find_actor_rigid_body_index(env, franka_handle, "ball_EEF", gymapi.DOMAIN_SIM)
+            eef_idx = self.gym.find_actor_rigid_body_index(env, eef_handle, "ball_EEF", gymapi.DOMAIN_SIM)
             self.eef_idxs.append(eef_idx)
 
             #create camera sensor
             # add camera sensor
             camera_props = gymapi.CameraProperties()
-            camera_props.width = 128
-            camera_props.height = 128
+            camera_props.width = 640
+            camera_props.height = 480
             camera_props.enable_tensors = True
             self.camera_position = gymapi.Vec3(.3, 0, shelf_pose.p.z - self.SHELF_LENGTH/2+.5)
             lookat_position = gymapi.Vec3(shelf_pose.p.x, shelf_pose.p.y, shelf_pose.p.z - self.SHELF_LENGTH/2+.2)
+            self.camera_vector = -torch.Tensor([[[1, 0, 0]]]).to(self.device)
             camera_handle = self.gym.create_camera_sensor(env, camera_props)
             camera_idxs.append(camera_handle)
             self.gym.set_camera_location(camera_handle, env, self.camera_position, lookat_position)
@@ -408,8 +435,8 @@ class Bookshelf():
 
             box_idx = self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_SIM)
             self.box_actor_idxs.append(torch.Tensor([box_idx]).to(torch.long).to(self.device))
-            franka_idx = self.gym.get_actor_index(env, franka_handle, gymapi.DOMAIN_SIM)
-            self.franka_idxs.append(torch.Tensor([franka_idx]).to(torch.long).to(self.device))
+            eef_actor_idx = self.gym.get_actor_index(env, eef_handle, gymapi.DOMAIN_SIM)
+            self.eef_actor_idxs.append(torch.Tensor([eef_actor_idx]).to(torch.long).to(self.device))
 
 
         # initial hand position and orientation tensors
@@ -419,13 +446,16 @@ class Bookshelf():
         self.proj_matrixes = torch.cat(proj_matrixes, 0)
         self.inv_view_matrixes = torch.cat(inv_view_matrixes, 0)
         self.box_size_tensor = torch.cat(box_size_tensor, 0)            
-        self.franka_idxs = torch.cat(self.franka_idxs, 0)
+        self.eef_actor_idxs = torch.cat(self.eef_actor_idxs, 0)
         self.box_actor_idxs = torch.cat(self.box_actor_idxs, 0)
         # point camera at middle env
         cam_pos = gymapi.Vec3(4, 3, 2)
         cam_target = gymapi.Vec3(-4, -3, 0)
         middle_env = self.envs[num_envs // 2 + num_per_row // 2]
-        self.gym.viewer_camera_look_at(self.viewer, middle_env, cam_pos, cam_target)
+        if self.USE_VIEWER:
+            self.gym.viewer_camera_look_at(self.viewer, middle_env, cam_pos, cam_target)
+            self.gym.subscribe_viewer_keyboard_event(
+                self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
 
         self.face_colors = torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1], [1, 0, 1]]).unsqueeze(0).expand(self.NUM_ENVS, -1, -1)
 
@@ -438,33 +468,33 @@ class Bookshelf():
 
         # get jacobian tensor
         # for fixed-base franka, tensor has shape (num envs, 10, 6, 9)
-        _jacobian = self.gym.acquire_jacobian_tensor(self.sim, "franka")
+        _jacobian = self.gym.acquire_jacobian_tensor(self.sim, "EEF")
         jacobian = gymtorch.wrap_tensor(_jacobian)
+        print("jacobian:", jacobian.shape)
 
         # jacobian entries corresponding to franka hand
-        self.j_eef = jacobian[:, self.eef_index - 1, :, :7]
+        self.j_eef = jacobian[:, self.eef_index - 1, :, :]
 
-        # get mass matrix tensor
-        # _massmatrix = self.gym.acquire_mass_matrix_tensor(self.sim, "franka")
-        # mm = gymtorch.wrap_tensor(_massmatrix)
-        # mm = mm[:, :7, :7]          # only need elements corresponding to the franka arm
+        #get mass matrix tensor
+        _massmatrix = self.gym.acquire_mass_matrix_tensor(self.sim, "EEF")
+        self.mm = gymtorch.wrap_tensor(_massmatrix)
 
         # get rigid body state tensor
         _rb_states = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.rb_states = gymtorch.wrap_tensor(_rb_states)
 
         # get dof state tensor
-        _dof_states = self.gym.acquire_dof_state_tensor(self.sim)
-        dof_states = gymtorch.wrap_tensor(_dof_states)
-        self.dof_pos = dof_states[:, 0].view(self.NUM_ENVS, 7, 1)
-        dof_vel = dof_states[:, 1].view(self.NUM_ENVS, 7, 1)
+        self._dof_states = self.gym.acquire_dof_state_tensor(self.sim)
+        self.dof_states = gymtorch.wrap_tensor(self._dof_states)
+        self.dof_pos = self.dof_states[:, 0].view(self.NUM_ENVS, self.eef_num_dofs, 1)
+        dof_vel = self.dof_states[:, 1].view(self.NUM_ENVS, self.eef_num_dofs, 1)
 
         
         #reset franka
-        self.default_franka_state = torch.zeros((self.default_dof_pos.shape[0], 2)).to(self.device)
-        self.default_franka_state[:, 0] = torch.Tensor(self.default_dof_pos).unsqueeze(0)
-        print(self.default_franka_state)
-        self.default_franka_state = torch.tile(self.default_franka_state, (self.NUM_ENVS, 1))
+        # self.default_franka_state = torch.zeros((self.default_dof_pos.shape[0], 2)).to(self.device)
+        # self.default_franka_state[:, 0] = torch.Tensor(self.default_dof_pos).unsqueeze(0)
+        # print(self.default_franka_state)
+        # self.default_franka_state = torch.tile(self.default_franka_state, (self.NUM_ENVS, 1))
 
     def control_ik(self, dpose):
         # solve damped least squares
@@ -474,9 +504,7 @@ class Bookshelf():
         return u
 
     def reset(self):
-        #TODO: fix this. Should take in a tensor with all the dof states, but works currently because only frankas have DOF states.
-        self.gym.set_dof_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.default_franka_state), gymtorch.unwrap_tensor(self.franka_idxs.to(torch.int)), self.NUM_ENVS)
-
+    
         # Create a tensor noting whether the hand should return to the initial position
         self.go_push = torch.full([self.NUM_ENVS], False, dtype=torch.bool).to(self.device)
 
@@ -491,9 +519,9 @@ class Bookshelf():
         self.pos_action = torch.zeros_like(self.dof_pos).squeeze(-1)
         self.effort_action = torch.zeros_like(self.pos_action)
 
-        _root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
-        root_tensor = gymtorch.wrap_tensor(_root_tensor)
-        update_box_root_tensor = root_tensor.clone()
+        self._root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
+        self.root_tensor = gymtorch.wrap_tensor(self._root_tensor)
+        update_box_root_tensor = self.root_tensor.clone()
         push_starts = []
         push_ends = []
         move_aways = []
@@ -536,6 +564,7 @@ class Bookshelf():
             move_aways.append(away.unsqueeze(0))
         box_states =  gymtorch.unwrap_tensor(update_box_root_tensor)
         self.gym.set_actor_root_state_tensor_indexed(self.sim, box_states, gymtorch.unwrap_tensor(self.box_actor_idxs.to(torch.int)), self.NUM_ENVS)
+        
         push_starts = torch.cat(push_starts, 0)
         push_ends = torch.cat(push_ends, 0)
         move_aways = torch.cat(move_aways, 0)
@@ -552,11 +581,13 @@ class Bookshelf():
         self.gym.refresh_jacobian_tensors(self.sim)
         self.gym.refresh_mass_matrix_tensors(self.sim)
         
-        self.gym.clear_lines(self.viewer)
+
         # refresh camera images
         self.gym.render_all_camera_sensors(self.sim)
-        self.gym.draw_viewer(self.viewer, self.sim, False)
-        self.gym.sync_frame_time(self.sim)
+        if(self.USE_VIEWER):
+            self.gym.clear_lines(self.viewer)
+            self.gym.draw_viewer(self.viewer, self.sim, False)
+            self.gym.sync_frame_time(self.sim)
 
         box_pos = self.rb_states[self.box_idxs, :3]
 
@@ -576,16 +607,23 @@ class Bookshelf():
         self.cartesian_steps = cartesian_steps*2
         self.cartesian_traj = torch.cat((push_traj, move_away_traj), dim=2)
 
+    def get_mask_centroid(self, mask):
+        mask_idxs = torch.nonzero(mask)
+        centroid = mask_idxs.to(torch.float).mean(dim=2)
+        return
 
 
     def observe(self):
+        crop_size = 128
+
          # refresh tensors
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
         self.gym.refresh_jacobian_tensors(self.sim)
         self.gym.refresh_mass_matrix_tensors(self.sim)
         
-        self.gym.clear_lines(self.viewer)
+        if self.USE_VIEWER:
+            self.gym.clear_lines(self.viewer)
         # refresh camera images
         self.gym.render_all_camera_sensors(self.sim)
 
@@ -600,134 +638,268 @@ class Bookshelf():
 
         # seg_depth_tensors = torch.where(curr_seg_tensors==self.BOX_SEG_ID, curr_depth_tensors.to(torch.double), float('nan')).to(torch.float)
 
-        pointcloud = backproject_tensor(self.proj_matrixes, self.inv_view_matrixes, curr_depth_tensors, curr_seg_tensors).clone()
+        pointcloud, segmentation_map, organized_pointcloud = backproject_tensor(self.proj_matrixes, self.inv_view_matrixes, curr_depth_tensors, curr_seg_tensors)
         # the view matrix transforms to the global frame rather than the environment frame, so we have to subtract the environment origins to 
         # turn them into the environment frame
+
+        # self.get_mask_centroid(curr_seg_tensors)
         pointcloud = pointcloud - self.env_origins.unsqueeze(1)
 
-        segmentation_map = curr_seg_tensors.flatten(1, 2).unsqueeze(-1)
-        state = torch.cat((pointcloud, segmentation_map), 2)
+        segmentation_map = segmentation_map .flatten(1, 2).unsqueeze(-1)
+        state = (torch.cat((pointcloud, segmentation_map), 2), organized_pointcloud)
 
         if self.DEBUG_VIZ:
-            self.box_pos = self.rb_states[self.box_idxs, :3]
-            self.box_rot = self.rb_states[self.box_idxs, 3:7]
-            box_face_normals, box_face_points = self.get_rect_planes(self.box_pos, self.box_rot, self.box_size_tensor)
-            self.calculate_graspability(box_face_normals,box_face_points,self.box_size_tensor)
-            axes_box_face_points = box_face_points
-            self.gym.end_access_image_tensors(self.sim)
-            #ALL CAMERA ACCESS CODE GOES IN HERE 
+
+            normals, _ = estimate_pc_normals(organized_pointcloud)
+            # normals = torch.where((torch.sum(normals*(self.camera_vector.expand(normals.shape)), -1) < 0).unsqueeze(-1).expand(normals.shape), normals, -normals)
+            camera_vector = torch.Tensor([[1, 0, 0]]).to(pointcloud.device)
+            camera_point = torch.Tensor([[0, 0, 1]]).to(pointcloud.device).unsqueeze(1).expand(normals.shape[0], normals.shape[1], 3)
+            # normals = torch.where((torch.sum(normals*(camera_vector.expand(normals.shape)), -1) >= 0).unsqueeze(-1).expand(normals.shape), normals, -normals)
+            
+            pos_dist = torch.sum(((pointcloud[:, :, 0:3]+normals)-camera_point)**2, dim=-1).unsqueeze(-1).expand(-1, -1, 3)
+            neg_dist = torch.sum(((pointcloud[:, :, 0:3]-normals)-camera_point)**2, dim=-1).unsqueeze(-1).expand(-1, -1, 3)
+            
+            normals = torch.where(pos_dist > neg_dist, -normals, normals)
             for i in range(len(self.envs)):
-                plane_origin = axes_box_face_points[i]
-                plane_end = (axes_box_face_points[i] + box_face_normals[i])
+                plane_origin = pointcloud[i]
+                plane_end = pointcloud[i] + normals[i]*.1
 
                 line_v = torch.zeros((plane_origin.shape[0]*2, 3)).to(self.device)
 
+                colors = torch.rand_like(plane_end)
+
                 line_v[::2, :] = plane_origin
                 line_v[1::2, :] = plane_end
-                self.gym.add_lines(self.viewer, self.envs[i], plane_origin.shape[0], line_v.cpu().numpy(), self.face_colors)
+                self.gym.add_lines(self.viewer, self.envs[i], plane_origin.shape[0], line_v.cpu().numpy(), colors.cpu().numpy())
+            # self.box_pos = self.rb_states[self.box_idxs, :3]
+            # self.box_rot = self.rb_states[self.box_idxs, 3:7]
+            # box_face_normals, box_face_points = self.get_rect_planes(self.box_pos, self.box_rot, self.box_size_tensor)
+            # self.calculate_graspability(box_face_normals,box_face_points,self.box_size_tensor)
+            # axes_box_face_points = box_face_points
+            # self.gym.end_access_image_tensors(self.sim)
+            # #ALL CAMERA ACCESS CODE GOES IN HERE 
+            # for i in range(len(self.envs)):
+            #     plane_origin = axes_box_face_points[i]
+            #     plane_end = (axes_box_face_points[i] + box_face_normals[i])
 
-            box_face_points = box_face_points
-            face_idxs = match_planes(box_face_normals, box_face_points, pointcloud)
+            #     line_v = torch.zeros((plane_origin.shape[0]*2, 3)).to(self.device)
 
-            for i in range(pointcloud.shape[0]):
-                pointcloud_e = pointcloud[i]
+            #     line_v[::2, :] = plane_origin
+            #     line_v[1::2, :] = plane_end
+            #     self.gym.add_lines(self.viewer, self.envs[i], plane_origin.shape[0], line_v.cpu().numpy(), self.face_colors)
 
-                non_nan_idxs = ~torch.isnan(pointcloud_e[:, 0])
-                p_e = pointcloud_e[non_nan_idxs].unsqueeze(0).expand(6, -1, -1).clone()
+            # box_face_points = box_face_points
+            # face_idxs = match_planes(box_face_normals, box_face_points, pointcloud)
 
-                box_face_idxs = face_idxs[i][:, non_nan_idxs]
-                face_normals = box_face_normals[i]
-                colors_e = self.face_colors[i]
+            # for i in range(pointcloud.shape[0]):
+            #     pointcloud_e = pointcloud[i]
 
-                box_face_idxs_normals_expand = face_normals.unsqueeze(1).expand(-1, box_face_idxs.shape[1], -1)
-                line_normals = box_face_idxs_normals_expand[box_face_idxs, :]
-                colors_expand = colors_e.unsqueeze(1).expand(-1, box_face_idxs.shape[1],-1)
-                colors = colors_expand[box_face_idxs, :]
+            #     non_nan_idxs = ~torch.isnan(pointcloud_e[:, 0])
+            #     p_e = pointcloud_e[non_nan_idxs].unsqueeze(0).expand(6, -1, -1).clone()
+
+            #     box_face_idxs = face_idxs[i][:, non_nan_idxs]
+            #     face_normals = box_face_normals[i]
+            #     colors_e = self.face_colors[i]
+
+            #     box_face_idxs_normals_expand = face_normals.unsqueeze(1).expand(-1, box_face_idxs.shape[1], -1)
+            #     line_normals = box_face_idxs_normals_expand[box_face_idxs, :]
+            #     colors_expand = colors_e.unsqueeze(1).expand(-1, box_face_idxs.shape[1],-1)
+            #     colors = colors_expand[box_face_idxs, :]
                 
-                final_p_e = p_e[box_face_idxs, :]
+            #     final_p_e = p_e[box_face_idxs, :]
 
-                line_start = torch.zeros((final_p_e.shape[0], 3)).to(self.device)
-                line_end = torch.zeros((final_p_e.shape[0], 3)).to(self.device)
-                line_origins = final_p_e #- env_origin - p_env_origin
-                line_start = line_origins
-                line_end = line_origins+line_normals*.1
-                lines = torch.cat((line_start, line_end), dim=1).clone()
-                self.gym.add_lines(self.viewer, self.envs[i], final_p_e.shape[0], lines.cpu().numpy(), colors)
+            #     line_start = torch.zeros((final_p_e.shape[0], 3)).to(self.device)
+            #     line_end = torch.zeros((final_p_e.shape[0], 3)).to(self.device)
+            #     line_origins = final_p_e #- env_origin - p_env_origin
+            #     line_start = line_origins
+            #     line_end = line_origins+line_normals*.1
+            #     lines = torch.cat((line_start, line_end), dim=1).clone()
+            #     self.gym.add_lines(self.viewer, self.envs[i], final_p_e.shape[0], lines.cpu().numpy(), colors)
 
         return state
 
-    def step(self, action):
-            # update viewer
-            self.gym.draw_viewer(self.viewer, self.sim, False)
-            self.gym.sync_frame_time(self.sim)
-            self.gym.refresh_force_sensor_tensor(self.sim)
+    def step(self):
+            # check for keyboard events
+            for evt in self.gym.query_viewer_action_events(self.viewer):
+                # if evt.action == "QUIT" and evt.value > 0:
+                #     sys.exit()
+                if evt.action == "toggle_viewer_sync" and evt.value > 0:
+                    self.USE_VIEWER = not self.USE_VIEWER
+
             # step the physics
             self.gym.simulate(self.sim)
             self.gym.fetch_results(self.sim, True)
-            self.gym.step_graphics(self.sim)
 
+            self.gym.refresh_force_sensor_tensor(self.sim)  
+            self.gym.refresh_actor_root_state_tensor(self.sim)
             self.gym.refresh_rigid_body_state_tensor(self.sim)
             self.gym.refresh_dof_state_tensor(self.sim)
             self.gym.refresh_jacobian_tensors(self.sim)
             self.gym.refresh_mass_matrix_tensors(self.sim)
             
+            # update viewer
+            if self.USE_VIEWER:
+                self.gym.step_graphics(self.sim)
+                self.gym.draw_viewer(self.viewer, self.sim, False)
+                self.gym.sync_frame_time(self.sim)
+            else:
+                self.gym.poll_viewer_events(self.viewer)
+
             # self.gym.clear_lines(self.viewer)
             # # refresh camera images
             # self.gym.render_all_camera_sensors(self.sim)
 
+    # Action state is #(batch, (3 + 3 + 2))
     def do_actions(self, actions):
-        #FIGURE OUT ACTION:
-        time_max = int(3.0 / self.dt)
+        #stash current variables
+        old_box_pos = self.rb_states[self.box_idxs, :3]
+        box_rot = self.rb_states[self.box_idxs, 3:7]
+        box_face_normals, box_face_points = self.get_rect_planes(old_box_pos, box_rot, self.box_size_tensor)
+        old_graspability = self.calculate_graspability(box_face_normals,box_face_points,self.box_size_tensor) > 0
+        old_segtensors = self.seg_tensors
+
+        old_reward_state = (old_box_pos, old_graspability, old_segtensors)
+        (action_points, action_normals, action_dirs) = actions
+        eef_states = torch.zeros((self.NUM_ENVS, 13)).to(self.device)
+        eef_start_pos = action_points + self.EEF_ROD_LEN*action_normals*1
+
+        angle = math.pi/2
+
+        up_vector = -torch.Tensor([[0, 0, 1]]).expand(self.NUM_ENVS, 3).to(self.device)
+        norm_normals = torch.nn.functional.normalize(action_normals, dim=1)
+        angle = -torch.acos(torch.sum(norm_normals*up_vector, -1))
+        axis = torch.nn.functional.normalize(torch.cross(norm_normals, up_vector), dim=-1)
+        axis_angle_rot = axis*angle.unsqueeze(-1)
+
+        rot_matrix = axis_angle_to_matrix(axis_angle_rot)
+        eef_start_quat = matrix_to_quaternion(axis_angle_to_matrix(axis_angle_rot))[:, [1, 2, 3, 0]]
+
+        eef_states[:, 0:3] = eef_start_pos
+        eef_states[:, 3:7] = eef_start_quat
+
+        if self.DEBUG_VIZ:
+            for i in range(len(self.envs)):
+                plane_origin = action_points[i]
+                plane_end = action_points[i] + action_normals[i]*.1
+                # plane_end = action_points[i] + test_normals*.1
+
+                line_v = torch.zeros((plane_origin.shape[0]*2, 3)).to(self.device)
+
+                colors = torch.rand_like(plane_end)
+
+                line_v[::2, :] = plane_origin
+                line_v[1::2, :] = plane_end
+                self.gym.add_lines(self.viewer, self.envs[i], plane_origin.shape[0], line_v.cpu().numpy(), colors.cpu().numpy())
+
+        self.step()
+        self._root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
+        self.root_tensor = gymtorch.wrap_tensor(self._root_tensor)
+        update_eef_states = self.root_tensor.clone()
+        update_eef_states[self.eef_actor_idxs, :] = eef_states
+        update_eef_dofs = torch.zeros_like(self.dof_states)
+        self.gym.set_dof_state_tensor(self.sim, gymtorch.unwrap_tensor(update_eef_dofs))
+        # self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(update_eef_states), gymtorch.unwrap_tensor(self.eef_actor_idxs.to(torch.int)), self.eef_actor_idxs.shape[0])
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(update_eef_states))
+        # self.step()
+        # while not self.gym.query_viewer_has_closed(self.viewer):
+        #     # input("waiting")
+        #     # update_eef_states = self.root_tensor.clone()
+        #     # update_eef_states[self.eef_actor_idxs, :] = eef_states
+        #     # self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(update_eef_states), gymtorch.unwrap_tensor(self.eef_actor_idxs.to(torch.int)), self.NUM_ENVS)
+        #     self.gym.draw_viewer(self.viewer, self.sim, False)
+        #     self.gym.step_graphics(self.sim)
+        #     self.step()
+
+
+        ACTON_TIMER = 10.0
+        time_max = int(ACTON_TIMER / self.dt)
         steps = 0
         z_depth = .05
-        while(steps < time_max):
+        action_dirs = torch.cat((action_dirs, torch.zeros(self.NUM_ENVS, 1).to(self.device)), dim=-1)
+        
+        FORCE_SCALER = lambda t: (t/6)**2 if t < 6 else 1
+        # FORCE_SCALER = lambda t: t
+
+        while (steps < time_max):
             self.box_pos = self.rb_states[self.box_idxs, :3]
             self.box_rot = self.rb_states[self.box_idxs, 3:7]
             eef_pos = self.rb_states[self.eef_idxs, :3]
             eef_rot = self.rb_states[self.eef_idxs, 3:7]
             eef_vel = self.rb_states[self.eef_idxs, 7:]
 
-            to_box = self.box_pos - eef_pos
-            box_dist = torch.norm(to_box, dim=-1).unsqueeze(-1)
-            box_dir = to_box / box_dist
-            box_dot = box_dir @ self.down_dir.view(3, 1)
+            force_vector = torch.zeros(self.NUM_ENVS, 6, 1).to(self.device)
 
-            # determine if we have reached the initial position; if so allow the hand to start moving to the box
+            plane_force = torch.bmm(rot_matrix, action_dirs.unsqueeze(-1)).squeeze()
+            FORCE_PERP_MAG = .4
+            FORCE_PARALLEL_MAG = .4
+            force_vector[:, 0:3, :] = (-action_normals*FORCE_PERP_MAG + plane_force*FORCE_PARALLEL_MAG).unsqueeze(-1)*FORCE_SCALER(steps*self.dt)
 
-            # if hand is above box, descend to grasp offset
-            # otherwise, seek a position above the box
-
-            curr_goals = torch.index_select(self.cartesian_traj, 2, self.cartesian_idx)[:, :, 0]
-            to_goal = curr_goals - eef_pos
-            goal_dist = torch.norm(to_goal, dim=1)
-            delta_err = goal_dist - self.last_dist
-            self.last_dist = goal_dist
-            arrived = (goal_dist < 0.06) & (delta_err < 0.001)
-
-            new_go_push = (~self.go_push & arrived).squeeze(-1)
-            self.go_push = self.go_push | new_go_push
-
-            self.cartesian_idx = torch.where(self.go_push & arrived & (self.cartesian_idx<(self.cartesian_steps-1)),  self.cartesian_idx+1, self.cartesian_idx)
-
-            # compute goal position and orientation
-            goal_pos = curr_goals
-            goal_rot = self.init_rot
-
-            # compute position and orientation error
-            pos_err = goal_pos - eef_pos
-            orn_err = orientation_error(goal_rot, eef_rot)
-            dpose = torch.cat([pos_err, orn_err], -1).unsqueeze(-1)
-            # Deploy control based on type
-            self.pos_action[:, :7] = self.dof_pos.squeeze(-1)[:, :7] + self.control_ik(dpose)
-
+            self.effort_action = torch.bmm(self.j_eef.transpose(1, 2),force_vector).squeeze()
+            max_vel = .5
             # Deploy actions
             self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.pos_action))
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.effort_action))
-            
+        
             _fsdata = self.gym.acquire_force_sensor_tensor(self.sim)
             fsdata = gymtorch.wrap_tensor(_fsdata)
             self.step()
             steps = steps+1
+            # input()
+
+        self._root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
+        self.root_tensor = gymtorch.wrap_tensor(self._root_tensor)
+        update_eef_states = self.root_tensor.clone()
+        update_eef_states[self.eef_actor_idxs, :] = torch.Tensor([0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]).to(self.device)
+        update_eef_dofs = torch.zeros_like(self.dof_states)
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(update_eef_states))
+        self.effort_action = torch.zeros_like(self.effort_action)
+        self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.pos_action))
+        self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.effort_action))
+        self.gym.set_dof_state_tensor(self.sim, gymtorch.unwrap_tensor(update_eef_dofs))
+
+        cleanup_steps = 100
+        steps = 0
+        while steps < cleanup_steps:
+            # Deploy actions
+            self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.pos_action))
+            self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.effort_action))
+            self.step()
+            steps += 1
+            
+
+        self.observe()
+        new_box_pos = self.rb_states[self.box_idxs, :3]
+        box_rot = self.rb_states[self.box_idxs, 3:7]
+        box_face_normals, box_face_points = self.get_rect_planes(new_box_pos, box_rot, self.box_size_tensor)
+        new_graspability = self.calculate_graspability(box_face_normals,box_face_points,self.box_size_tensor) > 0
+        new_segtensors = torch.cat(self.seg_tensors, 0)
+
+        new_reward_state = (new_box_pos, new_graspability, new_segtensors)
+        return self.calculate_reward(old_reward_state, new_reward_state)
+
+    def calculate_reward(self, old_state, new_state):
+        old_box_pos, old_grasp, old_seg = old_state
+        new_box_pos, new_grasp, new_seg = new_state
+
+        reward = 0
+
+        MOVEMENT_REWARD = torch.Tensor([.1]).double().to(old_box_pos.device)
+        GRASPABILITY_REWARD = torch.Tensor([1]).double().to(old_box_pos.device)
+        OBJECT_REMOVED_FROM_SCENE_REWARD = torch.Tensor([-1]).double().to(old_box_pos.device)
+        EPSILON = torch.Tensor([.05]).double().to(old_box_pos.device)
+        reward = torch.zeros((self.NUM_ENVS)).double().to(new_box_pos.device)
+
+        reward = torch.where(torch.sum((old_box_pos-new_box_pos)**2, -1) > EPSILON**2, (MOVEMENT_REWARD), reward)
+        
+        reward = reward + (new_grasp.int()-old_grasp.int())*GRASPABILITY_REWARD
+
+
+        shelf_bounds = [0, 416, 60, 580]#[60, 580, 0, 416]
+        cropped_seg = new_seg[:, shelf_bounds[0]:shelf_bounds[1], shelf_bounds[2]:shelf_bounds[3]]
+        reward = torch.where(torch.sum(cropped_seg, dim=(1,2)) == 0, OBJECT_REMOVED_FROM_SCENE_REWARD, reward)
+        
+        return reward
+        
     def cleanup(self):
         self.gym.destroy_viewer(self.viewer)
         self.gym.destroy_sim(self.sim)
@@ -737,12 +909,19 @@ if __name__ == "__main__":
     bookshelf.reset()
     frames = 0
     while not bookshelf.gym.query_viewer_has_closed(bookshelf.viewer):
-        if frames % 200 == 0:
-            bookshelf.reset()
-            state = bookshelf.observe()
-            print(state)
-        bookshelf.step(None)
-        frames = frames + 1
+        bookshelf.reset()
+        # state = bookshelf.observe()
+        fake_points = torch.Tensor([0, 0, 1]).to(bookshelf.device).unsqueeze(0).expand(bookshelf.NUM_ENVS, -1)
+        fake_normals = torch.Tensor([1, 1, 1]).to(bookshelf.device).unsqueeze(0).expand(bookshelf.NUM_ENVS, -1)
+        fake_dirs = torch.Tensor([math.sqrt(2), math.sqrt(2)]).to(bookshelf.device).unsqueeze(0).expand(bookshelf.NUM_ENVS, -1)
+        fake_actions = (fake_points, fake_normals, fake_dirs)
+        bookshelf.do_actions(fake_actions)
+        # if frames % 200 == 0:
+        #     bookshelf.reset()
+        #     state = bookshelf.observe()
+        #     print(state)
+        # bookshelf.step(None)
+        # frames = frames + 1
     bookshelf.cleanup()
 
 

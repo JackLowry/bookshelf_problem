@@ -14,7 +14,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from .pointnet_utils import PointNetFeaturePropagation, PointNetSetAbstraction, PointNetSetAbstractionMsg
+from pointnet2_utils import PointNetFeaturePropagation, PointNetSetAbstraction, PointNetSetAbstractionMsg
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 Transition = namedtuple('Transition',
@@ -73,7 +73,7 @@ class UniNet_MT_V2(nn.Module):
 			nn.Linear(128, 64),
 			nn.BatchNorm1d(64),
 			nn.ReLU(),
-			nn.Dropout(0.2), # drop 30% during training
+			nn.Dropout(0.2), # drop 30% during `train`ing
 			nn.Linear(64, 32),
 			nn.Linear(32, 2)
 		])
@@ -235,15 +235,11 @@ class DQN(nn.Module):
         self.fp1 = PointNetFeaturePropagation(96, [64, 64])
 
 
-        self.direction_classifier = nn.Sequential(*[
-			nn.Linear(96, 64),
-			nn.BatchNorm1d(64),
-			nn.ReLU(),
-			nn.Dropout(0.2), # drop 30% during training
-			nn.Linear(64, 32),
-			nn.Linear(32, 16),
-            nn.Softmax()
-		])
+        self.direction_classifier = nn.Sequential(*[nn.Conv1d(64, 32, kernel_size=(1, )),
+                                          nn.BatchNorm1d(32),
+                                          nn.ReLU(),
+                                          nn.Conv1d(32, 16, kernel_size=(1, )),
+                                          ])
 
         self.heatmap_reg = nn.Sequential(*[nn.Conv1d(64, 32, kernel_size=(1, )),
                                           nn.BatchNorm1d(32),
@@ -255,7 +251,7 @@ class DQN(nn.Module):
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, sample):
-        xyz = sample['data']
+        xyz = sample.transpose(1, 2)
 
         B, C, N = xyz.shape
         l0_xyz = xyz[:, :3, :]
@@ -275,8 +271,8 @@ class DQN(nn.Module):
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
         l0_points = self.fp1(l0_xyz, l1_xyz, None, l1_points)
 
-        directions = self.direction_classifier(l0_points)
-        heatmap = self.heatmap_reg(l0_points)
+        directions = self.direction_classifier(l0_points).transpose(1, 2)
+        heatmap = self.heatmap_reg(l0_points).transpose(1,2)
 
         return {'preds': [directions, heatmap]}
         # if self.only_test:
